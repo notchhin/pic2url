@@ -3,7 +3,6 @@ import tempfile
 import secrets
 import logging
 from pathlib import Path
-import httpx  # Use httpx instead of requests
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
@@ -15,50 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger('pic2url')
 
 UPLOAD_DIR = Path(os.environ.get('PIC2URL_UPLOAD_DIR', '/opt/pic2url-uploads'))
-PUBLIC_BASE_URL = os.environ.get('PIC2URL_BASE_URL', 'https://chhin.tech/pic2url').rstrip('/')
-
-FREEIMAGE_ENDPOINT = "https://freeimage.host/api/1/upload"
-FALLBACK_UPLOAD_ENDPOINT = "https://uguu.se/upload.php"
-
-async def upload_to_freeimage_async(local_path: str, api_key: str) -> dict:
-    """Uploads image asynchronously using httpx."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        with open(local_path, "rb") as f:
-            files = {"source": f}
-            data = {
-                "key": api_key,
-                "action": "upload",
-                "format": "json",
-            }
-            # The async call allows other bot functions to run while waiting
-            response = await client.post(FREEIMAGE_ENDPOINT, data=data, files=files)
-            
-        if response.status_code != 200:
-            raise RuntimeError(f"FreeImage returned {response.status_code}: {response.text[:500]}")
-
-        payload = response.json()
-        if payload.get('status_code') and payload.get('status_code') != 200:
-            raise RuntimeError(f"FreeImage API error {payload.get('status_code')}: {payload.get('status_txt') or payload}")
-
-        return payload
-
-
-async def upload_to_fallback_async(local_path: str) -> str:
-    """Uploads image to Uguu when FreeImage is failing."""
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-        with open(local_path, "rb") as f:
-            files = {"files[]": (Path(local_path).name, f)}
-            response = await client.post(FALLBACK_UPLOAD_ENDPOINT, files=files)
-
-        if response.status_code != 200:
-            raise RuntimeError(f"Uguu returned {response.status_code}: {response.text[:500]}")
-
-        payload = response.json()
-        files_meta = payload.get('files') or []
-        url = files_meta[0].get('url') if files_meta else None
-        if not url or not str(url).startswith('http'):
-            raise RuntimeError(f"Uguu unexpected response: {payload}")
-        return url
+PUBLIC_BASE_URL = os.environ.get('PIC2URL_BASE_URL', 'https://img.chhin.tech').rstrip('/')
 
 async def save_locally_and_get_url(local_path: str, suffix: str) -> str:
     """Stores the image on this VPS and returns a permanent public URL."""
@@ -71,12 +27,7 @@ async def save_locally_and_get_url(local_path: str, suffix: str) -> str:
 
 
 async def process_and_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, suffix: str):
-    """Core logic to download from TG and upload to FreeImage."""
-    api_key = os.environ.get("FREEIMAGE_KEY")
-    if not api_key:
-        await update.message.reply_text("❌ Server missing FREEIMAGE_KEY.")
-        return
-
+    """Download an image from Telegram, save it on the VPS, and return the public URL."""
     # 1. Get file from Telegram (with specific timeout)
     tg_file = await context.bot.get_file(file_id, read_timeout=30)
 
@@ -87,22 +38,8 @@ async def process_and_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # 2. Download locally
         await tg_file.download_to_drive(custom_path=tmp_path)
 
-        # 3. Save to this VPS first (permanent), then fall back to remote hosts only if local storage fails
-        direct = None
-        try:
-            direct = await save_locally_and_get_url(tmp_path, suffix)
-        except Exception as local_error:
-            logger.warning("Local VPS save failed, falling back to remote upload: %s", local_error)
-            try:
-                payload = await upload_to_freeimage_async(tmp_path, api_key)
-                image = payload.get("image", {})
-                direct = image.get("url") or image.get("display_url")
-                if not direct:
-                    raise RuntimeError("FreeImage upload succeeded, but no direct URL was returned")
-            except Exception as upload_error:
-                logger.warning("FreeImage failed, falling back to Uguu: %s", upload_error)
-                direct = await upload_to_fallback_async(tmp_path)
-
+        # 3. Save to this VPS and return the permanent public URL
+        direct = await save_locally_and_get_url(tmp_path, suffix)
         await update.message.reply_text(f"`{direct}`", parse_mode="Markdown")
 
     except Exception as e:
