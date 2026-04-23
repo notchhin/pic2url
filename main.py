@@ -20,7 +20,7 @@ async def save_locally_and_get_url(local_path: str, suffix: str) -> str:
     """Stores the image on this VPS and returns a permanent public URL."""
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     safe_suffix = suffix if suffix.startswith('.') else f'.{suffix}'
-    filename = f"{secrets.token_urlsafe(12)}{safe_suffix.lower()}"
+    filename = f"{secrets.token_urlsafe(6)}{safe_suffix.lower()}"
     target_path = UPLOAD_DIR / filename
     target_path.write_bytes(Path(local_path).read_bytes())
     return f"{PUBLIC_BASE_URL}/{filename}"
